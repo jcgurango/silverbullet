@@ -71,7 +71,6 @@ import { plugPrefix } from "$common/spaces/constants.ts";
 import { lezerToParseTree } from "$common/markdown_parser/parse_tree.ts";
 import { findNodeMatching } from "$sb/lib/tree.ts";
 import type { LinkObject } from "../plugs/index/page_links.ts";
-import type { BuiltinSettings } from "$type/settings.ts";
 import { diffAndPrepareChanges } from "./cm_util.ts";
 import type { Config } from "../type/config.ts";
 
