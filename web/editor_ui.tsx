@@ -32,7 +32,8 @@ export class MainUI {
           closeSearchPanel(client.editorView);
           return;
         } else if (
-          target.className === "cm-textfield" || target.closest(".cm-content")
+          target.className === "cm-textfield" ||
+          target.closest(".cm-content")
         ) {
           // In some cm element, let's back out
           return;
@@ -85,9 +86,7 @@ export class MainUI {
     }, [viewState.currentPage, viewState.currentPageMeta]);
 
     useEffect(() => {
-      client.tweakEditorDOM(
-        client.editorView.contentDOM,
-      );
+      client.tweakEditorDOM(client.editorView.contentDOM);
     }, [viewState.uiOptions.forcedROMode]);
 
     useEffect(() => {
@@ -222,80 +221,97 @@ export class MainUI {
             console.log("Now renaming page to...", newName);
             await client.clientSystem.system.invokeFunction(
               "index.renamePageCommand",
-              [{ page: newName }],
+              [{ page: newName }]
             );
             client.focus();
           }}
           actionButtons={[
+            ...[
+              {
+                icon: featherIcons.Save,
+                description: "Save changes",
+                class: !viewState.unsavedChanges ? "sb-disabled" : undefined,
+                callback: () => {
+                  this.client.save(true);
+                },
+              },
+            ],
             // Sync button
             ...(!window.silverBulletConfig.syncOnly &&
-                !viewState.config.hideSyncButton)
-              // If we support syncOnly, don't show this toggle button
-              ? [{
-                icon: featherIcons.RefreshCw,
-                description: this.client.syncMode
-                  ? "Currently in Sync mode, click to switch to Online mode"
-                  : "Currently in Online mode, click to switch to Sync mode",
-                class: this.client.syncMode ? "sb-enabled" : undefined,
-                callback: () => {
-                  (async () => {
-                    const newValue = !this.client.syncMode;
+            !viewState.config.hideSyncButton
+              ? // If we support syncOnly, don't show this toggle button
+                [
+                  {
+                    icon: featherIcons.RefreshCw,
+                    description: this.client.syncMode
+                      ? "Currently in Sync mode, click to switch to Online mode"
+                      : "Currently in Online mode, click to switch to Sync mode",
+                    class: this.client.syncMode ? "sb-enabled" : undefined,
+                    callback: () => {
+                      (async () => {
+                        const newValue = !this.client.syncMode;
 
-                    if (newValue) {
-                      localStorage.setItem("syncMode", "true");
-                      this.client.flashNotification(
-                        "Now switching to sync mode, one moment please...",
-                      );
-                      await sleep(1000);
-                      location.reload();
-                    } else {
-                      localStorage.removeItem("syncMode");
-                      this.client.flashNotification(
-                        "Now switching to online mode, one moment please...",
-                      );
-                      await sleep(1000);
-                      location.reload();
-                    }
-                  })().catch(console.error);
-                },
-              }]
-              : [],
+                        if (newValue) {
+                          localStorage.setItem("syncMode", "true");
+                          this.client.flashNotification(
+                            "Now switching to sync mode, one moment please..."
+                          );
+                          await sleep(1000);
+                          location.reload();
+                        } else {
+                          localStorage.removeItem("syncMode");
+                          this.client.flashNotification(
+                            "Now switching to online mode, one moment please..."
+                          );
+                          await sleep(1000);
+                          location.reload();
+                        }
+                      })().catch(console.error);
+                    },
+                  },
+                ]
+              : []),
             // Edit (reader/writer) button ONLY on mobile
-            ...(viewState.isMobile && !viewState.config.hideEditButton)
-              ? [{
-                icon: featherIcons.Edit3,
-                description: viewState.uiOptions.forcedROMode
-                  ? "Currently in reader mode, click to switch to writer mode"
-                  : "Currently in writer mode, click to switch to reader mode",
-                class: !viewState.uiOptions.forcedROMode
-                  ? "sb-enabled"
-                  : undefined,
-                callback: () => {
-                  dispatch({
-                    type: "set-ui-option",
-                    key: "forcedROMode",
-                    value: !viewState.uiOptions.forcedROMode,
-                  });
-                  // After a tick (to have the dispatch update the state), rebuild the editor
-                  setTimeout(() => {
-                    client.rebuildEditorState();
-                  });
-                },
-              }]
-              : [],
+            ...(viewState.isMobile && !viewState.config.hideEditButton
+              ? [
+                  {
+                    icon: featherIcons.Edit3,
+                    description: viewState.uiOptions.forcedROMode
+                      ? "Currently in reader mode, click to switch to writer mode"
+                      : "Currently in writer mode, click to switch to reader mode",
+                    class: !viewState.uiOptions.forcedROMode
+                      ? "sb-enabled"
+                      : undefined,
+                    callback: () => {
+                      dispatch({
+                        type: "set-ui-option",
+                        key: "forcedROMode",
+                        value: !viewState.uiOptions.forcedROMode,
+                      });
+                      // After a tick (to have the dispatch update the state), rebuild the editor
+                      setTimeout(() => {
+                        client.rebuildEditorState();
+                      });
+                    },
+                  },
+                ]
+              : []),
             // Custom action buttons
             ...(viewState.config.actionButtons.length > 0
               ? viewState.config.actionButtons
-              : defaultActionButtons)
-              .filter((button) =>
-                (typeof button.mobile === "undefined") ||
-                (button.mobile === viewState.isMobile)
+              : defaultActionButtons
+            )
+              .filter(
+                (button) =>
+                  typeof button.mobile === "undefined" ||
+                  button.mobile === viewState.isMobile
               )
               .map((button) => {
                 const parsedCommand = parseCommand(button.command);
                 const mdiIcon = (mdi as any)[kebabToCamel(button.icon)];
-                let featherIcon =
-                  (featherIcons as any)[kebabToCamel(button.icon)];
+                let featherIcon = (featherIcons as any)[
+                  kebabToCamel(button.icon)
+                ];
                 if (!featherIcon) {
                   featherIcon = featherIcons.HelpCircle;
                 }
@@ -305,32 +321,39 @@ export class MainUI {
                   callback: () => {
                     client.runCommandByName(
                       parsedCommand.name,
-                      parsedCommand.args,
+                      parsedCommand.args
                     );
                   },
                   href: "",
                 };
               }),
           ]}
-          rhs={!!viewState.panels.rhs.mode && (
-            <div
-              className="panel"
-              style={{ flex: viewState.panels.rhs.mode }}
-            />
-          )}
-          lhs={!!viewState.panels.lhs.mode && (
-            <div
-              className="panel"
-              style={{ flex: viewState.panels.lhs.mode }}
-            />
-          )}
-          pageNamePrefix={viewState.currentPageMeta?.pageDecoration
-            ?.prefix ??
-            ""}
-          cssClass={viewState.currentPageMeta?.pageDecoration?.cssClasses
-            ? viewState.currentPageMeta?.pageDecoration?.cssClasses
-              .join(" ").replaceAll(/[^a-zA-Z0-9-_ ]/g, "")
-            : ""}
+          rhs={
+            !!viewState.panels.rhs.mode && (
+              <div
+                className="panel"
+                style={{ flex: viewState.panels.rhs.mode }}
+              />
+            )
+          }
+          lhs={
+            !!viewState.panels.lhs.mode && (
+              <div
+                className="panel"
+                style={{ flex: viewState.panels.lhs.mode }}
+              />
+            )
+          }
+          pageNamePrefix={
+            viewState.currentPageMeta?.pageDecoration?.prefix ?? ""
+          }
+          cssClass={
+            viewState.currentPageMeta?.pageDecoration?.cssClasses
+              ? viewState.currentPageMeta?.pageDecoration?.cssClasses
+                  .join(" ")
+                  .replaceAll(/[^a-zA-Z0-9-_ ]/g, "")
+              : ""
+          }
         />
         <div id="sb-main">
           {!!viewState.panels.lhs.mode && (
@@ -366,8 +389,7 @@ export class MainUI {
 }
 
 function kebabToCamel(str: string) {
-  return str.replace(/-([a-z])/g, (g) => g[1].toUpperCase()).replace(
-    /^./,
-    (g) => g.toUpperCase(),
-  );
+  return str
+    .replace(/-([a-z])/g, (g) => g[1].toUpperCase())
+    .replace(/^./, (g) => g.toUpperCase());
 }
