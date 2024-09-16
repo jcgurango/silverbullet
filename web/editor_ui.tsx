@@ -221,7 +221,7 @@ export class MainUI {
             console.log("Now renaming page to...", newName);
             await client.clientSystem.system.invokeFunction(
               "index.renamePageCommand",
-              [{ page: newName }]
+              [{ page: newName }],
             );
             client.focus();
           }}
@@ -238,73 +238,72 @@ export class MainUI {
             ],
             // Sync button
             ...(!window.silverBulletConfig.syncOnly &&
-            !viewState.config.hideSyncButton
-              ? // If we support syncOnly, don't show this toggle button
-                [
-                  {
-                    icon: featherIcons.RefreshCw,
-                    description: this.client.syncMode
-                      ? "Currently in Sync mode, click to switch to Online mode"
-                      : "Currently in Online mode, click to switch to Sync mode",
-                    class: this.client.syncMode ? "sb-enabled" : undefined,
-                    callback: () => {
-                      (async () => {
-                        const newValue = !this.client.syncMode;
+                !viewState.config.hideSyncButton
+              // If we support syncOnly, don't show this toggle button
+              ? [
+                {
+                  icon: featherIcons.RefreshCw,
+                  description: this.client.syncMode
+                    ? "Currently in Sync mode, click to switch to Online mode"
+                    : "Currently in Online mode, click to switch to Sync mode",
+                  class: this.client.syncMode ? "sb-enabled" : undefined,
+                  callback: () => {
+                    (async () => {
+                      const newValue = !this.client.syncMode;
 
-                        if (newValue) {
-                          localStorage.setItem("syncMode", "true");
-                          this.client.flashNotification(
-                            "Now switching to sync mode, one moment please..."
-                          );
-                          await sleep(1000);
-                          location.reload();
-                        } else {
-                          localStorage.removeItem("syncMode");
-                          this.client.flashNotification(
-                            "Now switching to online mode, one moment please..."
-                          );
-                          await sleep(1000);
-                          location.reload();
-                        }
-                      })().catch(console.error);
-                    },
+                      if (newValue) {
+                        localStorage.setItem("syncMode", "true");
+                        this.client.flashNotification(
+                          "Now switching to sync mode, one moment please...",
+                        );
+                        await sleep(1000);
+                        location.reload();
+                      } else {
+                        localStorage.removeItem("syncMode");
+                        this.client.flashNotification(
+                          "Now switching to online mode, one moment please...",
+                        );
+                        await sleep(1000);
+                        location.reload();
+                      }
+                    })().catch(console.error);
                   },
-                ]
+                },
+              ]
               : []),
             // Edit (reader/writer) button ONLY on mobile
             ...(viewState.isMobile && !viewState.config.hideEditButton
               ? [
-                  {
-                    icon: featherIcons.Edit3,
-                    description: viewState.uiOptions.forcedROMode
-                      ? "Currently in reader mode, click to switch to writer mode"
-                      : "Currently in writer mode, click to switch to reader mode",
-                    class: !viewState.uiOptions.forcedROMode
-                      ? "sb-enabled"
-                      : undefined,
-                    callback: () => {
-                      dispatch({
-                        type: "set-ui-option",
-                        key: "forcedROMode",
-                        value: !viewState.uiOptions.forcedROMode,
-                      });
-                      // After a tick (to have the dispatch update the state), rebuild the editor
-                      setTimeout(() => {
-                        client.rebuildEditorState();
-                      });
-                    },
+                {
+                  icon: featherIcons.Edit3,
+                  description: viewState.uiOptions.forcedROMode
+                    ? "Currently in reader mode, click to switch to writer mode"
+                    : "Currently in writer mode, click to switch to reader mode",
+                  class: !viewState.uiOptions.forcedROMode
+                    ? "sb-enabled"
+                    : undefined,
+                  callback: () => {
+                    dispatch({
+                      type: "set-ui-option",
+                      key: "forcedROMode",
+                      value: !viewState.uiOptions.forcedROMode,
+                    });
+                    // After a tick (to have the dispatch update the state), rebuild the editor
+                    setTimeout(() => {
+                      client.rebuildEditorState();
+                    });
                   },
-                ]
+                },
+              ]
               : []),
             // Custom action buttons
             ...(viewState.config.actionButtons.length > 0
               ? viewState.config.actionButtons
-              : defaultActionButtons
-            )
+              : defaultActionButtons)
               .filter(
                 (button) =>
                   typeof button.mobile === "undefined" ||
-                  button.mobile === viewState.isMobile
+                  button.mobile === viewState.isMobile,
               )
               .map((button) => {
                 const parsedCommand = parseCommand(button.command);
@@ -321,39 +320,32 @@ export class MainUI {
                   callback: () => {
                     client.runCommandByName(
                       parsedCommand.name,
-                      parsedCommand.args
+                      parsedCommand.args,
                     );
                   },
                   href: "",
                 };
               }),
           ]}
-          rhs={
-            !!viewState.panels.rhs.mode && (
-              <div
-                className="panel"
-                style={{ flex: viewState.panels.rhs.mode }}
-              />
-            )
-          }
-          lhs={
-            !!viewState.panels.lhs.mode && (
-              <div
-                className="panel"
-                style={{ flex: viewState.panels.lhs.mode }}
-              />
-            )
-          }
-          pageNamePrefix={
-            viewState.currentPageMeta?.pageDecoration?.prefix ?? ""
-          }
-          cssClass={
-            viewState.currentPageMeta?.pageDecoration?.cssClasses
-              ? viewState.currentPageMeta?.pageDecoration?.cssClasses
-                  .join(" ")
-                  .replaceAll(/[^a-zA-Z0-9-_ ]/g, "")
-              : ""
-          }
+          rhs={!!viewState.panels.rhs.mode && (
+            <div
+              className="panel"
+              style={{ flex: viewState.panels.rhs.mode }}
+            />
+          )}
+          lhs={!!viewState.panels.lhs.mode && (
+            <div
+              className="panel"
+              style={{ flex: viewState.panels.lhs.mode }}
+            />
+          )}
+          pageNamePrefix={viewState.currentPageMeta?.pageDecoration?.prefix ??
+            ""}
+          cssClass={viewState.currentPageMeta?.pageDecoration?.cssClasses
+            ? viewState.currentPageMeta?.pageDecoration?.cssClasses
+              .join(" ")
+              .replaceAll(/[^a-zA-Z0-9-_ ]/g, "")
+            : ""}
         />
         <div id="sb-main">
           {!!viewState.panels.lhs.mode && (
