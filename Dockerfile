@@ -1,5 +1,12 @@
-FROM denoland/deno:debian-2.2.2
+FROM denoland/deno:debian-2.2.2 as builder
 
+# Build silverbullet
+WORKDIR /build
+ADD . /build
+RUN deno task build
+RUN deno task bundle
+
+FROM denoland/deno:debian-2.2.2
 # The volume that will keep the space data
 
 # Either create a volume:
@@ -44,8 +51,9 @@ EXPOSE 3000
 ENV SB_HOSTNAME 0.0.0.0
 ENV SB_FOLDER /space
 
-# Copy the bundled version of silverbullet into the container
-ADD ./dist/silverbullet.js /silverbullet.js
+# Use the deno build from the builder
+COPY --from=builder /build/dist/silverbullet.js /silverbullet.js
+
 # Precache any remaining dependencies
 RUN deno cache /silverbullet.js
 
