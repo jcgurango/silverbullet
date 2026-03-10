@@ -132,6 +132,12 @@
     "turndown": "npm:turndown@7.2.2",
     "ajv": "npm:ajv@8.17.1",
     "turndown-plugin-gfm": "npm:@joplin/turndown-plugin-gfm@1.0.64",
-    "@msgpack/msgpack": "npm:@msgpack/msgpack@3.1.3"
+    "@msgpack/msgpack": "npm:@msgpack/msgpack@3.1.3",
+    "yjs": "npm:yjs@13.6.20",
+    "y-protocols": "npm:y-protocols@1.0.6",
+    "y-codemirror.next": "npm:y-codemirror.next@0.3.5",
+    "y-websocket": "npm:y-websocket@2.0.4",
+    "y-indexeddb": "npm:y-indexeddb@9.0.12",
+    "lib0": "npm:lib0@0.2.98"
   }
 }

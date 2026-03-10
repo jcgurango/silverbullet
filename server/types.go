@@ -18,6 +18,10 @@ type ServerConfig struct {
 	HostURLPrefix string
 
 	ClientBundle SpacePrimitives
+
+	// CRDT sidecar configuration
+	CrdtSidecarPort   int
+	CrdtSpaceFolder   string
 }
 
 type UserPasswordAuthorizer func(username, password string) bool
@@ -45,6 +49,10 @@ type SpaceConfig struct {
 
 	// Shell configuration
 	ShellBackend ShellBackend
+
+	// CRDT configuration
+	CrdtEnabled bool
+	CrdtPort    int
 
 	// Auth temporary objects
 	JwtIssuer    *Authenticator

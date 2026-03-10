@@ -82,6 +82,7 @@ import { LuaRuntimeError } from "./space_lua/runtime.ts";
 import { resolveASTReference } from "./space_lua.ts";
 import { ObjectIndex } from "./data/object_index.ts";
 import type { LuaCollectionQuery } from "./space_lua/query_collection.ts";
+import { CrdtProvider } from "./crdt/crdt_provider.ts";
 
 const frontMatterRegex = /^---\n(([^\n]|\n)*?)---\n/;
 
@@ -124,6 +125,9 @@ export class Client {
   commandKeyHandlerCompartment?: Compartment;
   indentUnitCompartment?: Compartment;
   undoHistoryCompartment?: Compartment;
+
+  // CRDT provider for current page (when CRDT sync is enabled)
+  crdtProvider: CrdtProvider | null = null;
 
   // Document editor
   documentEditor: DocumentEditor | null = null;
@@ -380,6 +384,8 @@ export class Client {
         // Only reload when watching the current page or document (to avoid reloading when switching pages)
         if (
           this.space.watchInterval && this.currentPath() === path &&
+          // When CRDT is active, remote changes arrive via Yjs — skip file-triggered reloads
+          !this.crdtProvider &&
           // Avoid reloading if the page was just saved (5s window)
           (!lastSaveTimestamp || (lastSaveTimestamp < Date.now() - 5000)) &&
           // Avoid reloading if the previous hash was undefined (first load)
@@ -470,6 +476,12 @@ export class Client {
             this.isReadOnlyMode()
           ) {
             // No unsaved changes, or read-only mode, not gonna save
+            return resolve();
+          }
+
+          // When CRDT is active, the sidecar handles persistence
+          if (this.crdtProvider) {
+            this.ui.viewDispatch({ type: "page-saved" });
             return resolve();
           }
 
@@ -788,6 +800,13 @@ export class Client {
         this.currentName(),
         editorView.state.sliceDoc(),
         this.currentPageMeta()?.perm === "ro",
+        this.crdtProvider
+          ? {
+            ytext: this.crdtProvider.ytext,
+            awareness: this.crdtProvider.awareness,
+            undoManager: this.crdtProvider.undoManager,
+          }
+          : undefined,
       ),
     );
   }
@@ -1038,6 +1057,11 @@ export class Client {
     if (previousPath) {
       this.space.unwatchFile(previousPath);
       await this.save(true);
+      // Tear down CRDT provider for previous page
+      if (this.crdtProvider) {
+        this.crdtProvider.destroy();
+        this.crdtProvider = null;
+      }
     }
 
     // Fetch next page to open
@@ -1152,6 +1176,29 @@ export class Client {
       }
     }
 
+    // Set up CRDT provider if enabled and page is writable
+    let crdtOptions: Parameters<typeof createEditorState>[4];
+    if (
+      this.bootConfig.crdtEnabled &&
+      this.bootConfig.crdtWsEndpoint &&
+      doc.meta.perm !== "ro"
+    ) {
+      this.crdtProvider = new CrdtProvider(
+        this.bootConfig.crdtWsEndpoint,
+        path,
+      );
+      const synced = await this.crdtProvider.waitForSync();
+      if (synced) {
+        // Use CRDT content as authoritative
+        doc.text = this.crdtProvider.ytext.toString();
+      }
+      crdtOptions = {
+        ytext: this.crdtProvider.ytext,
+        awareness: this.crdtProvider.awareness,
+        undoManager: this.crdtProvider.undoManager,
+      };
+    }
+
     // When loading a different page OR if the page is read-only (in which case we don't want to apply local patches, because there's no point)
     if (loadingDifferentPath || doc.meta.perm === "ro") {
       const editorState = createEditorState(
@@ -1159,6 +1206,7 @@ export class Client {
         pageName,
         doc.text,
         doc.meta.perm === "ro",
+        crdtOptions,
       );
       this.editorView.setState(editorState);
     } else {

@@ -186,6 +186,10 @@ export type BootConfig = {
   performReset?: boolean;
 
   enableClientEncryption: boolean;
+
+  // CRDT sync
+  crdtEnabled?: boolean;
+  crdtWsEndpoint?: string;
 };
 
 /**

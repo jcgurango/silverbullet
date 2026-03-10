@@ -7,7 +7,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +31,10 @@ type BootConfig struct {
 
 	// Encryption
 	EnableClientEncryption bool `json:"enableClientEncryption"`
+
+	// CRDT sync
+	CrdtEnabled    bool   `json:"crdtEnabled,omitempty"`
+	CrdtWsEndpoint string `json:"crdtWsEndpoint,omitempty"`
 }
 
 func Router(config *ServerConfig) chi.Router {
@@ -75,6 +81,10 @@ func Router(config *ServerConfig) chi.Router {
 			LogPush:         spaceConfig.LogPush,
 			// Client encryption is offered as an option when auth is enabled only
 			EnableClientEncryption: spaceConfig.Auth != nil,
+			CrdtEnabled:           spaceConfig.CrdtEnabled,
+		}
+		if spaceConfig.CrdtEnabled {
+			clientConfig.CrdtWsEndpoint = fmt.Sprintf("%s/.crdt/ws/", config.HostURLPrefix)
 		}
 
 		w.Header().Set("Cache-Control", "no-cache")
@@ -86,6 +96,11 @@ func Router(config *ServerConfig) chi.Router {
 
 	// Log collection endpoint
 	routes.Post("/.logs", handleLogsEndpoint)
+
+	// CRDT WebSocket proxy (must be before general proxy)
+	if config.CrdtSidecarPort > 0 {
+		routes.Mount("/.crdt/ws", buildCrdtProxyRoutes(config.CrdtSidecarPort))
+	}
 
 	// Proxy endpoint
 	routes.HandleFunc("/.proxy/*", proxyHandler)
@@ -126,6 +141,12 @@ func Router(config *ServerConfig) chi.Router {
 }
 
 func RunServer(config *ServerConfig) error {
+	// Start CRDT sidecar if enabled
+	var sidecar *sidecarProcess
+	if config.CrdtSidecarPort > 0 {
+		sidecar = startCrdtSidecar(config)
+	}
+
 	r := Router(config)
 	// Display the final server running message
 	visibleHostname := config.BindHost
@@ -157,6 +178,11 @@ func RunServer(config *ServerConfig) error {
 	s := <-signalChannel
 	log.Println("Received signal:", s)
 
+	// Stop CRDT sidecar
+	if sidecar != nil {
+		sidecar.stop()
+	}
+
 	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownRelease()
 
@@ -166,4 +192,68 @@ func RunServer(config *ServerConfig) error {
 	<-shutdownChannel
 	log.Println("Graceful shutdown complete.")
 	return nil
+}
+
+type sidecarProcess struct {
+	cmd        *exec.Cmd
+	config     *ServerConfig
+	shuttingDown atomic.Bool
+}
+
+func startCrdtSidecar(config *ServerConfig) *sidecarProcess {
+	sc := &sidecarProcess{config: config}
+	sc.start()
+
+	// Monitor sidecar in background and restart if it crashes
+	go func() {
+		for {
+			err := sc.cmd.Wait()
+			if sc.shuttingDown.Load() {
+				return
+			}
+			if err != nil {
+				log.Printf("CRDT sidecar exited: %v, restarting...", err)
+				time.Sleep(2 * time.Second)
+				sc.start()
+			} else {
+				return
+			}
+		}
+	}()
+
+	return sc
+}
+
+func (sc *sidecarProcess) start() {
+	cmd := exec.Command("deno", "run",
+		"--allow-net", "--allow-read", "--allow-write", "--allow-env",
+		"sidecar/main.ts",
+	)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("SB_CRDT_PORT=%d", sc.config.CrdtSidecarPort),
+		fmt.Sprintf("SB_SPACE_FOLDER=%s", sc.config.CrdtSpaceFolder),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Kill sidecar when parent process dies
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Pdeathsig: syscall.SIGTERM,
+	}
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("Warning: failed to start CRDT sidecar: %v", err)
+		return
+	}
+
+	sc.cmd = cmd
+	log.Printf("CRDT sidecar started (PID %d) on port %d", cmd.Process.Pid, sc.config.CrdtSidecarPort)
+}
+
+func (sc *sidecarProcess) stop() {
+	sc.shuttingDown.Store(true)
+	if sc.cmd != nil && sc.cmd.Process != nil {
+		log.Println("Stopping CRDT sidecar...")
+		sc.cmd.Process.Signal(syscall.SIGTERM)
+		sc.cmd.Wait()
+	}
 }

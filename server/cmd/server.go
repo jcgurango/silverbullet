@@ -202,6 +202,22 @@ func buildConfig(bundledFiles fs.FS, args []string, buildTime string) *server.Se
 		rootSpaceConfig.ShellBackend = server.NewNotSupportedShell()
 	}
 
+	// CRDT sidecar configuration
+	if os.Getenv("SB_CRDT_ENABLED") != "" {
+		rootSpaceConfig.CrdtEnabled = true
+		crdtPort := 3001
+		if os.Getenv("SB_CRDT_PORT") != "" {
+			crdtPort, err = strconv.Atoi(os.Getenv("SB_CRDT_PORT"))
+			if err != nil {
+				log.Fatalf("Could not parse SB_CRDT_PORT as number: %v", err)
+			}
+		}
+		rootSpaceConfig.CrdtPort = crdtPort
+		serverConfig.CrdtSidecarPort = crdtPort
+		serverConfig.CrdtSpaceFolder = rootSpaceConfig.SpaceFolderPath
+		log.Printf("CRDT sync enabled, sidecar port: %d", crdtPort)
+	}
+
 	// Ensure at least the index page and config page exist
 	ensureIndexAndConfig(rootSpaceConfig)
 

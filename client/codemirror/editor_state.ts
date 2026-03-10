@@ -48,6 +48,7 @@ import { languageFor } from "../languages.ts";
 import { plugLinter } from "./lint.ts";
 import { extendedMarkdownLanguage } from "../markdown_parser/parser.ts";
 import { safeRun } from "@silverbulletmd/silverbullet/lib/async";
+import { yCollab } from "y-codemirror.next";
 import { codeCopyPlugin } from "../codemirror/code_copy.ts";
 import { disableSpellcheck } from "../codemirror/spell_checking.ts";
 import type { ClickEvent } from "@silverbulletmd/silverbullet/type/client";
@@ -57,6 +58,11 @@ export function createEditorState(
   pageName: string,
   text: string,
   readOnly: boolean,
+  crdtOptions?: {
+    ytext: import("yjs").Text;
+    awareness: import("y-protocols/awareness").Awareness;
+    undoManager: import("yjs").UndoManager;
+  },
 ): EditorState {
   let touchCount = 0;
 
@@ -76,7 +82,17 @@ export function createEditorState(
   );
 
   client.undoHistoryCompartment = new Compartment();
-  const undoHistory = client.undoHistoryCompartment.of([history()]);
+  let undoHistory;
+  if (crdtOptions) {
+    // Use yCollab for undo/redo when CRDT is active
+    undoHistory = client.undoHistoryCompartment.of([
+      yCollab(crdtOptions.ytext, crdtOptions.awareness, {
+        undoManager: crdtOptions.undoManager,
+      }),
+    ]);
+  } else {
+    undoHistory = client.undoHistoryCompartment.of([history()]);
+  }
 
   return EditorState.create({
     doc: text,
@@ -316,7 +332,10 @@ export function createEditorState(
               client.dispatchAppEvent("editor:pageModified", { changes });
               client.ui.viewDispatch({ type: "page-changed" });
               client.debouncedUpdateEvent();
-              client.save().catch((e) => console.error("Error saving", e));
+              // When CRDT is active, the sidecar handles persistence — skip HTTP save
+              if (!client.crdtProvider) {
+                client.save().catch((e) => console.error("Error saving", e));
+              }
             }
           }
         },

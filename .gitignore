@@ -17,3 +17,4 @@ website/_plug
 tmp
 .idea
 AGENTS.md
+.crdt/
