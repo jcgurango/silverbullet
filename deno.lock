@@ -29,6 +29,7 @@
     "npm:@codemirror/language@6.12.1": "6.12.1",
     "npm:@codemirror/legacy-modes@6.5.2": "6.5.2",
     "npm:@codemirror/lint@6.9.2": "6.9.2",
+    "npm:@codemirror/merge@6.7.3": "6.7.3",
     "npm:@codemirror/search@6.6.0": "6.6.0",
     "npm:@codemirror/state@6.5.4": "6.5.4",
     "npm:@codemirror/view@6.39.11": "6.39.11",
@@ -233,6 +234,16 @@
         "@codemirror/state",
         "@codemirror/view",
         "crelt"
+      ]
+    },
+    "@codemirror/merge@6.7.3": {
+      "integrity": "sha512-xOSyyh/7KqqiHjKJ4qGXXkAvt1BYaqvkjh/6EOC/IHeQbCQh9P2WqBbSNemdIqxrNf/aPCWXLRrimaS1PrbDJA==",
+      "dependencies": [
+        "@codemirror/language",
+        "@codemirror/state",
+        "@codemirror/view",
+        "@lezer/highlight",
+        "style-mod"
       ]
     },
     "@codemirror/search@6.6.0": {
@@ -807,6 +818,7 @@
       "npm:@codemirror/language@6.12.1",
       "npm:@codemirror/legacy-modes@6.5.2",
       "npm:@codemirror/lint@6.9.2",
+      "npm:@codemirror/merge@6.7.3",
       "npm:@codemirror/search@6.6.0",
       "npm:@codemirror/state@6.5.4",
       "npm:@codemirror/view@6.39.11",

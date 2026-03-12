@@ -84,6 +84,7 @@
     "@silverbulletmd/silverbullet/lib/tags": "./plug-api/lib/tags.ts",
     "@codemirror/autocomplete": "npm:@codemirror/autocomplete@6.20.0",
     "@codemirror/commands": "npm:@codemirror/commands@6.10.1",
+    "@codemirror/merge": "npm:@codemirror/merge@6.7.3",
     "@codemirror/lang-css": "npm:@codemirror/lang-css@6.3.1",
     "@codemirror/lang-html": "npm:@codemirror/lang-html@6.4.11",
     "@codemirror/lang-javascript": "npm:@codemirror/lang-javascript@6.2.4",

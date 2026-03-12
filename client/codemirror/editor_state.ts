@@ -50,6 +50,7 @@ import { extendedMarkdownLanguage } from "../markdown_parser/parser.ts";
 import { safeRun } from "@silverbulletmd/silverbullet/lib/async";
 import { codeCopyPlugin } from "../codemirror/code_copy.ts";
 import { disableSpellcheck } from "../codemirror/spell_checking.ts";
+import { conflictMarkerExtension } from "../codemirror/conflict_marker.ts";
 import type { ClickEvent } from "@silverbulletmd/silverbullet/type/client";
 
 export function createEditorState(
@@ -158,6 +159,7 @@ export function createEditorState(
       }),
       inlineContentPlugin(client),
       codeCopyPlugin(client),
+      conflictMarkerExtension(),
       highlightSpecialChars(),
       undoHistory,
       dropCursor(),

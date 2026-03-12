@@ -39,6 +39,7 @@ import type { StyleObject } from "../plugs/index/space_style.ts";
 import { jitter, throttle } from "@silverbulletmd/silverbullet/lib/async";
 import { EventedSpacePrimitives } from "./spaces/evented_space_primitives.ts";
 import { HttpSpacePrimitives } from "./spaces/http_space_primitives.ts";
+import { MergeConflictError } from "./spaces/merge_conflict.ts";
 import {
   encodePageURI,
   encodeRef,
@@ -128,6 +129,7 @@ export class Client {
   // Document editor
   documentEditor: DocumentEditor | null = null;
   saveTimeout?: number;
+
   debouncedUpdateEvent = throttle(() => {
     this.eventHook
       .dispatchEvent("editor:updated")
@@ -525,6 +527,17 @@ export class Client {
                 }
               })
               .catch((e) => {
+                if (e instanceof MergeConflictError) {
+                  // Merge conflict — the sync engine has written conflict markers to the local file.
+                  // Reload to pick them up; the inline conflict extension handles resolution.
+                  this.flashNotification(
+                    "Merge conflict — resolve the highlighted sections below",
+                    "error",
+                  );
+                  this.loadPage({ path: this.currentPath() });
+                  reject(e);
+                  return;
+                }
                 this.flashNotification(
                   "Could not save page, retrying again in 10 seconds",
                   "error",
@@ -560,6 +573,7 @@ export class Client {
       type === "info" ? 4000 : 5000,
     );
   }
+
 
   reportError(e: any, context: string = "") {
     console.error(`Error during ${context}:`, e);
@@ -1201,6 +1215,7 @@ export class Client {
         console.error("Failed to set cursor at cursor marker:", e);
       }
     }
+
   }
 
   isDocumentEditor(): this is { documentEditor: DocumentEditor } & this {
@@ -1415,6 +1430,30 @@ export class Client {
           location.href = message.actionOrRedirectHeader;
         } else {
           location.reload();
+        }
+        break;
+      }
+      case "merge-conflict": {
+        console.warn(
+          "Merge conflict received for",
+          message.path,
+          "serverHash:",
+          message.serverHash,
+        );
+        // The sync engine has already written conflict markers into the local file.
+        // If the file is currently open, reload it so the inline conflict UI appears.
+        if (this.currentPath() === message.path) {
+          this.flashNotification(
+            `Merge conflict — resolve the highlighted sections below`,
+            "error",
+          );
+          // Reload the page content to pick up the conflict markers
+          this.loadPage({ path: message.path });
+        } else {
+          this.flashNotification(
+            `Merge conflict in ${message.path} — open the file to resolve`,
+            "error",
+          );
         }
         break;
       }

@@ -6,6 +6,8 @@ import { stdLibPrefix } from "../spaces/constants.ts";
 import type { SpacePrimitives } from "../spaces/space_primitives.ts";
 import { SpaceSync, SyncSnapshot, type SyncStatus } from "../spaces/sync.ts";
 import type { HttpSpacePrimitives } from "../spaces/http_space_primitives.ts";
+import { MergeConflictError } from "../spaces/merge_conflict.ts";
+import type { FileMeta } from "@silverbulletmd/silverbullet/type/index";
 
 const syncSnapshotKey = ["$sync", "snapshot"];
 const syncInterval = 20;
@@ -35,6 +37,73 @@ export type SyncConfig = {
 };
 
 /**
+ * Wraps HttpSpacePrimitives to automatically manage hash tracking via the sync snapshot.
+ * Before writes: sets parent hash from snapshot.syncedHashes
+ * After reads/writes: captures content hash into snapshot.syncedHashes
+ */
+class HashTrackingSpacePrimitives implements SpacePrimitives {
+  constructor(
+    private inner: HttpSpacePrimitives,
+    private getSnapshot: () => SyncSnapshot,
+  ) {}
+
+  fetchFileList(): Promise<FileMeta[]> {
+    return this.inner.fetchFileList();
+  }
+
+  getFileMeta(path: string, observing?: boolean): Promise<FileMeta> {
+    // Intentionally no hash tracking on getFileMeta — it's like "git fetch",
+    // just reconnaissance. Only actual content operations update hash state.
+    return this.inner.getFileMeta(path, observing);
+  }
+
+  async readFile(path: string): Promise<{ data: Uint8Array; meta: FileMeta }> {
+    const result = await this.inner.readFile(path);
+
+    // After pull: update synced hash (like "git pull" updates HEAD)
+    if (path.endsWith(".md")) {
+      const hash = this.inner.consumeContentHash(path);
+      if (hash) {
+        this.getSnapshot().syncedHashes.set(path, hash);
+      }
+    }
+
+    return result;
+  }
+
+  async writeFile(
+    path: string,
+    data: Uint8Array,
+    meta?: FileMeta,
+  ): Promise<FileMeta> {
+    // Before push: set parent hash from snapshot (like "git push" uses local HEAD)
+    if (path.endsWith(".md")) {
+      const parentHash = this.getSnapshot().syncedHashes.get(path);
+      this.inner.setParentHash(path, parentHash);
+    }
+
+    const result = await this.inner.writeFile(path, data, meta);
+
+    // After push: update synced hash (like "git push" succeeding updates remote tracking)
+    if (path.endsWith(".md")) {
+      const hash = this.inner.consumeContentHash(path);
+      if (hash) {
+        this.getSnapshot().syncedHashes.set(path, hash);
+      }
+    }
+
+    return result;
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    await this.inner.deleteFile(path);
+    // Clean up hash tracking on delete
+    this.getSnapshot().syncedHashes.delete(path);
+    this.getSnapshot().conflictedFiles.delete(path);
+  }
+}
+
+/**
  * Thin wrapper around SpaceSync, adds snapshot persistence and a few other things
  */
 export class SyncEngine extends EventEmitter<SyncEngineEvents> {
@@ -56,10 +125,24 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
     super();
   }
 
+  /**
+   * Get the synced content hash for a file from the persisted snapshot.
+   * Used by proxy_router to include X-Content-Hash in responses.
+   */
+  getSyncedHash(path: string): string | undefined {
+    return this.snapshot?.syncedHashes.get(path);
+  }
+
   async start() {
     this.snapshot = await this.loadSnapshot();
 
-    this.spaceSync = new SpaceSync(this.local, this.remote, {
+    // Wrap remote in hash-tracking layer that auto-manages syncedHashes
+    const hashTrackedRemote = new HashTrackingSpacePrimitives(
+      this.remote,
+      () => this.snapshot,
+    );
+
+    this.spaceSync = new SpaceSync(this.local, hashTrackedRemote, {
       conflictResolver: this.stdLibAwareConflictResolver.bind(this),
       isSyncCandidate: this.isSyncCandidate.bind(this),
     });
@@ -176,6 +259,7 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
 
   /**
    * Delegates to the standard primary conflict resolver, but in case of any conflicts in plugs, it will always take the version from the secondary.
+   * For .md files, delegates to server-side 3-way merge instead of creating .conflicted copies.
    */
   async stdLibAwareConflictResolver(
     name: string,
@@ -183,43 +267,146 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
     primary: SpacePrimitives,
     secondary: SpacePrimitives,
   ): Promise<number> {
-    if (!name.startsWith(stdLibPrefix)) {
-      const operations = await SpaceSync.primaryConflictResolver(
+    if (name.startsWith(stdLibPrefix)) {
+      console.log(
+        "[sync]",
+        "Conflict in plug",
+        name,
+        "will pick the version from secondary and be done with it.",
+      );
+      // Read file from secondary
+      const { data, meta } = await secondary.readFile(name);
+      // Write file to primary
+      const newMeta = await primary.writeFile(name, data, meta);
+      // Update snapshot
+      snapshot.files.set(name, [
+        newMeta.lastModified,
+        meta.lastModified,
+      ]);
+      return 1;
+    }
+
+    // For .md files: let the server's versioned write handle the merge
+    if (name.endsWith(".md")) {
+      return this.serverSideMergeResolver(
         name,
         snapshot,
         primary,
         secondary,
       );
-
-      if (operations > 0) {
-        // Something happened -> conflict copy generated, let's report it
-        this.emit("syncConflict", name);
-      }
-
-      return operations;
     }
+
+    // For non-.md files: use the old primary-wins conflict resolver
+    const operations = await SpaceSync.primaryConflictResolver(
+      name,
+      snapshot,
+      primary,
+      secondary,
+    );
+
+    if (operations > 0) {
+      // Something happened -> conflict copy generated, let's report it
+      this.emit("syncConflict", name);
+    }
+
+    return operations;
+  }
+
+  /**
+   * Conflict resolver for .md files that delegates to the server's 3-way merge.
+   * Instead of creating .conflicted copies, pushes local version to server
+   * which will either merge cleanly or return a 409 (MergeConflictError).
+   *
+   * On clean merge: pulls merged content back to local, updates snapshot.
+   * On conflict: writes conflict-marked content to local, freezes file from sync.
+   */
+  private async serverSideMergeResolver(
+    name: string,
+    snapshot: SyncSnapshot,
+    primary: SpacePrimitives,
+    secondary: SpacePrimitives,
+  ): Promise<number> {
     console.log(
       "[sync]",
-      "Conflict in plug",
-      name,
-      "will pick the version from secondary and be done with it.",
-    );
-    // Read file from secondary
-    const { data, meta } = await secondary.readFile(
+      "Using server-side merge for",
       name,
     );
-    // Write file to primary
-    const newMeta = await primary.writeFile(
-      name,
-      data,
-      meta,
-    );
-    // Update snapshot
-    snapshot.files.set(name, [
-      newMeta.lastModified,
-      meta.lastModified,
-    ]);
 
-    return 1;
+    // Read local version
+    const { data: localData, meta: localMeta } = await primary.readFile(name);
+
+    try {
+      // Push to server — this triggers the server's versioned write (3-way merge)
+      // The HashTrackingSpacePrimitives wrapper will set X-Parent-Hash from snapshot
+      const writtenMeta = await secondary.writeFile(name, localData, localMeta);
+
+      // Server merged cleanly. Read back the merged content to sync locally.
+      const { data: mergedData, meta: remoteMeta } = await secondary.readFile(
+        name,
+      );
+      const newLocalMeta = await primary.writeFile(name, mergedData, remoteMeta);
+
+      // Update snapshot
+      snapshot.files.set(name, [
+        newLocalMeta.lastModified,
+        remoteMeta.lastModified,
+      ]);
+
+      console.log("[sync]", "Server-side merge succeeded for", name);
+      return 1;
+    } catch (e: any) {
+      if (e instanceof MergeConflictError) {
+        console.warn("[sync]", "Server-side merge conflict for", name);
+
+        // Write conflict-marked content to local so user can resolve it
+        const newLocalMeta = await primary.writeFile(
+          name,
+          e.conflictContent,
+          localMeta,
+        );
+
+        // Freeze this file from further sync until conflict markers are resolved
+        snapshot.conflictedFiles.add(name);
+
+        // Update synced hash to the server's current hash so that when the user
+        // resolves and saves, the next push will use the correct parent
+        if (e.serverHash) {
+          snapshot.syncedHashes.set(name, e.serverHash);
+        }
+
+        // Update snapshot timestamps
+        // Use the local meta from writing conflict content as primary timestamp
+        // Keep the secondary timestamp as-is (we haven't changed the server)
+        const existingSnapshot = snapshot.files.get(name);
+        snapshot.files.set(name, [
+          newLocalMeta.lastModified,
+          existingSnapshot ? existingSnapshot[1] : 0,
+        ]);
+
+        // Emit conflict event for UI notification
+        this.emit("syncConflict", name);
+
+        // Broadcast merge conflict details to all clients for the merge UI
+        // deno-lint-ignore no-explicit-any
+        (self as any).clients?.matchAll({ type: "window" }).then(
+          // deno-lint-ignore no-explicit-any
+          (clients: any[]) => {
+            const conflictText = new TextDecoder().decode(e.conflictContent);
+            // deno-lint-ignore no-explicit-any
+            clients.forEach((client: any) => {
+              client.postMessage({
+                type: "merge-conflict",
+                path: name,
+                conflictContent: conflictText,
+                serverHash: e.serverHash,
+              });
+            });
+          },
+        );
+
+        return 1; // We did write (conflict content) to local
+      }
+      throw e;
+    }
   }
 }

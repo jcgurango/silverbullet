@@ -239,4 +239,9 @@ export type ServiceWorkerSourceMessage = {
 } | {
   type: "encryption-key";
   key: string;
+} | {
+  type: "merge-conflict";
+  path: string;
+  conflictContent: string;
+  serverHash: string | null;
 };

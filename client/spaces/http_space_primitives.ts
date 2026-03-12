@@ -11,16 +11,48 @@ import {
   wrongSpacePathError,
 } from "@silverbulletmd/silverbullet/constants";
 import { headersToFileMeta } from "../lib/util.ts";
+import { MergeConflictError } from "./merge_conflict.ts";
 
 const defaultFetchTimeout = 30000; // 30 seconds
 
 export class HttpSpacePrimitives implements SpacePrimitives {
+  // Per-path parent hashes to send with writeFile calls (set by sync engine from snapshot)
+  private parentHashes: Map<string, string> = new Map();
+
+  // Per-path content hashes from the last readFile or writeFile response
+  // (read by sync engine to update snapshot, then consumed)
+  private contentHashes: Map<string, string> = new Map();
+
   constructor(
     readonly url: string,
     readonly expectedSpacePath: string,
     private authErrorCallback: (message: string, ...args: any[]) => void,
     private bearerToken?: string,
   ) {
+  }
+
+  /**
+   * Set the parent hash for the next writeFile call for a specific path.
+   * Called by the sync engine before pushing a file, using the persisted syncedHash from the snapshot.
+   */
+  setParentHash(path: string, hash: string | undefined) {
+    if (hash) {
+      this.parentHashes.set(path, hash);
+    } else {
+      this.parentHashes.delete(path);
+    }
+  }
+
+  /**
+   * Get and consume the content hash from the last readFile or writeFile for a specific path.
+   * Returns undefined if no hash is available.
+   */
+  consumeContentHash(path: string): string | undefined {
+    const hash = this.contentHashes.get(path);
+    if (hash) {
+      this.contentHashes.delete(path);
+    }
+    return hash;
   }
 
   public async authenticatedFetch(
@@ -59,14 +91,9 @@ export class HttpSpacePrimitives implements SpacePrimitives {
           "You are not authenticated, reloading to reauthenticate",
           "reload",
         );
-        // console.log("Unregistering service workers", redirectHeader);
-        // await unregisterServiceWorkers();
-        // location.reload();
         // Let's throw to avoid any further processing
         throw Error("Not authenticated");
       }
-
-      // console.log("Got response", result.status, result.statusText, result.url);
 
       // Attempting to handle various authentication proxies
       if (result.status >= 300 && result.status < 400) {
@@ -76,29 +103,27 @@ export class HttpSpacePrimitives implements SpacePrimitives {
             "Received an authentication redirect",
             redirectHeader,
           );
-          // location.href = redirectHeader;
           throw new Error("Redirected");
         } else {
-          console.error("Got a redirect status but no location header", result);
+          console.error(
+            "Got a redirect status but no location header",
+            result,
+          );
         }
       }
       // Check for unauthorized status
       if (result.status === 401 || result.status === 403) {
-        // If it came with a redirect header, we'll redirect to that URL
         if (redirectHeader) {
           console.log(
             "Received unauthorized status and got a redirect via the API so will redirect to URL",
             result.url,
           );
           this.authErrorCallback("You are not authenticated ", redirectHeader);
-          // location.href = redirectHeader;
           throw new Error("Not authenticated");
         } else {
-          // If not, let's reload
           this.authErrorCallback(
             "You are not authenticated, going to reload and hope that that kicks off authentication",
           );
-          // location.reload();
           throw new Error("Not authenticated");
         }
       }
@@ -174,6 +199,13 @@ export class HttpSpacePrimitives implements SpacePrimitives {
     if (res.status === 404) {
       throw notFoundError;
     }
+
+    // Store content hash per-path for the sync engine to consume
+    const contentHash = res.headers.get("X-Content-Hash");
+    if (contentHash) {
+      this.contentHashes.set(path, contentHash);
+    }
+
     return {
       data: new Uint8Array(await res.arrayBuffer()),
       meta: headersToFileMeta(path, res.headers)!,
@@ -194,6 +226,13 @@ export class HttpSpacePrimitives implements SpacePrimitives {
       headers["X-Perm"] = "" + meta.perm;
     }
 
+    // Send parent hash from sync engine's snapshot (consume it so it's not reused)
+    const parentHash = this.parentHashes.get(path);
+    if (parentHash) {
+      headers["X-Parent-Hash"] = parentHash;
+      this.parentHashes.delete(path);
+    }
+
     const res = await this.authenticatedFetch(
       `${this.url}/${encodePageURI(path)}`,
       {
@@ -203,6 +242,20 @@ export class HttpSpacePrimitives implements SpacePrimitives {
         body: data as any,
       },
     );
+
+    // Handle merge conflict (HTTP 409)
+    if (res.status === 409) {
+      const conflictContent = new Uint8Array(await res.arrayBuffer());
+      const serverHash = res.headers.get("X-Content-Hash");
+      throw new MergeConflictError(path, conflictContent, serverHash);
+    }
+
+    // Store content hash per-path for the sync engine to consume
+    const contentHash = res.headers.get("X-Content-Hash");
+    if (contentHash) {
+      this.contentHashes.set(path, contentHash);
+    }
+
     return headersToFileMeta(path, res.headers)!;
   }
 
@@ -237,6 +290,11 @@ export class HttpSpacePrimitives implements SpacePrimitives {
     if (!res.ok) {
       throw new Error(`Failed to get file meta: ${res.statusText}`);
     }
+
+    // Note: we intentionally do NOT update any hash tracking here.
+    // getFileMeta is like "git fetch" — just reconnaissance.
+    // Only readFile and writeFile (actual content operations) update hash state.
+
     return headersToFileMeta(path, res.headers)!;
   }
 

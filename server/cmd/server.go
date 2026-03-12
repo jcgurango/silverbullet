@@ -183,6 +183,15 @@ func buildConfig(bundledFiles fs.FS, args []string, buildTime string) *server.Se
 	serverConfig.ClientBundle = server.NewReadOnlyFallthroughSpacePrimitives(bundledFiles, "client", bundlePathDate, nil)
 	rootSpaceConfig.SpacePrimitives = server.NewReadOnlyFallthroughSpacePrimitives(bundledFiles, "base_fs", bundlePathDate, spacePrimitives)
 
+	// Initialize version history store
+	if !rootSpaceConfig.ReadOnlyMode {
+		rootSpaceConfig.HistoryStore = server.NewHistoryStore(rootSpaceConfig.SpaceFolderPath, time.Minute)
+		rootSpaceConfig.HistoryMaxAge = 7 * 24 * time.Hour
+		// Start background pruner (runs hourly)
+		rootSpaceConfig.HistoryStore.StartPruner(rootSpaceConfig.HistoryMaxAge, time.Hour)
+		log.Println("Version history enabled (7-day retention, 1-minute commit interval)")
+	}
+
 	if serverConfig.BindHost == "127.0.0.1" {
 		log.Println("SilverBullet will only be available locally, to allow outside connections, pass -L0.0.0.0 as a flag, and put a TLS terminator on top.")
 	}

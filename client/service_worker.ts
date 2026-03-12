@@ -272,6 +272,14 @@ self.addEventListener("message", async (event: any) => {
               isOnline,
             });
           },
+          mergeConflict: (path, conflictContent, serverHash) => {
+            broadcastMessage({
+              type: "merge-conflict",
+              path,
+              conflictContent,
+              serverHash,
+            });
+          },
         });
         syncEngine.on({
           syncProgress: (status) => {

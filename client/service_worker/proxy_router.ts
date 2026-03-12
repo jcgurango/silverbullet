@@ -9,6 +9,10 @@ import {
 } from "@silverbulletmd/silverbullet/constants";
 import type { SyncEngine } from "./sync_engine.ts";
 import { EventEmitter } from "../plugos/event.ts";
+import {
+  hasConflictMarkers,
+  MergeConflictError,
+} from "../spaces/merge_conflict.ts";
 
 const alwaysProxy = [
   "/.auth",
@@ -24,6 +28,12 @@ export type ProxyRouterEvents = {
   observedRequest: (path: string) => void;
   // Use case: client showing the "yellow bar" indicating not being online
   onlineStatusUpdated: (isOnline: boolean) => void;
+  // Use case: server returned a merge conflict (409) during sync
+  mergeConflict: (
+    path: string,
+    conflictContent: string,
+    serverHash: string | null,
+  ) => void;
 };
 
 /**
@@ -215,6 +225,22 @@ export class ProxyRouter extends EventEmitter<ProxyRouterEvents> {
     return this.syncEngine!.snapshot.nonSyncedFiles;
   }
 
+  /**
+   * Adds X-Content-Hash to response headers from the persisted sync snapshot.
+   */
+  private addContentHash(
+    path: string,
+    headers: Record<string, string>,
+  ): Record<string, string> {
+    if (this.syncEngine) {
+      const hash = this.syncEngine.getSyncedHash(path);
+      if (hash) {
+        headers["X-Content-Hash"] = hash;
+      }
+    }
+    return headers;
+  }
+
   async handleFileListing(): Promise<Response> {
     if (!this.syncEngine || !this.localSpacePrimitives) {
       throw new Error("This should not happen");
@@ -258,13 +284,15 @@ export class ProxyRouter extends EventEmitter<ProxyRouterEvents> {
             this.emit("observedRequest", path);
           });
         }
+        const headers = this.addContentHash(path, fileMetaToHeaders(meta));
         return new Response(null, {
-          headers: fileMetaToHeaders(meta),
+          headers,
         });
       } else {
         const { meta, data } = await this.localSpacePrimitives.readFile(path);
+        const headers = this.addContentHash(path, fileMetaToHeaders(meta));
         return new Response(data as any, {
-          headers: fileMetaToHeaders(meta),
+          headers,
         });
       }
     } catch (err: any) {
@@ -309,12 +337,31 @@ export class ProxyRouter extends EventEmitter<ProxyRouterEvents> {
         // Synced file
         const body = await request.arrayBuffer();
         // console.log("Handling file write", path, body.byteLength);
+        const bodyBytes = new Uint8Array(body);
         const meta = await this.localSpacePrimitives.writeFile(
           path,
-          new Uint8Array(body),
+          bodyBytes,
           // Note: there are going to be many cases where no meta is supplied in the request, this is ok, in that case this argument will be undefined
           headersToFileMeta(path, request.headers),
         );
+
+        // Unfreeze conflicted files once conflict markers are resolved
+        if (
+          path.endsWith(".md") &&
+          this.syncEngine.snapshot.conflictedFiles.has(path)
+        ) {
+          const text = new TextDecoder().decode(bodyBytes);
+          if (!hasConflictMarkers(text)) {
+            console.log(
+              "[sync]",
+              "Conflict markers resolved, unfreezing",
+              path,
+            );
+            this.syncEngine.snapshot.conflictedFiles.delete(path);
+            this.syncEngine.saveSnapshot(this.syncEngine.snapshot);
+          }
+        }
+
         // Attempt immediate sync
         try {
           const operations = await this.syncEngine.syncSingleFile(path);
@@ -323,10 +370,23 @@ export class ProxyRouter extends EventEmitter<ProxyRouterEvents> {
             // Sync was in progress, will sync later
             return new Response("Delayed", {
               status: 202,
-              headers: fileMetaToHeaders(meta),
+              headers: this.addContentHash(path, fileMetaToHeaders(meta)),
             });
           }
         } catch (e: any) {
+          if (e instanceof MergeConflictError) {
+            console.warn("Merge conflict for", path);
+            const conflictText = new TextDecoder().decode(e.conflictContent);
+            this.emit("mergeConflict", path, conflictText, e.serverHash);
+            // Return 409 to the caller so the editor knows about the conflict
+            return new Response(e.conflictContent as any, {
+              status: 409,
+              headers: {
+                ...fileMetaToHeaders(meta),
+                "X-Content-Hash": e.serverHash || "",
+              },
+            });
+          }
           console.error(
             "File sync delayed for",
             path,
@@ -336,13 +396,13 @@ export class ProxyRouter extends EventEmitter<ProxyRouterEvents> {
           // Sync failed (could be offline or other reason)
           return new Response(e.message, {
             status: 202,
-            headers: fileMetaToHeaders(meta),
+            headers: this.addContentHash(path, fileMetaToHeaders(meta)),
           });
         }
 
         return new Response("OK", {
           status: 200,
-          headers: fileMetaToHeaders(meta),
+          headers: this.addContentHash(path, fileMetaToHeaders(meta)),
         });
       }
     } catch (e: any) {

@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"net/http"
 	"sync"
+	"time"
 )
 
 type ServerConfig struct {
@@ -45,6 +46,10 @@ type SpaceConfig struct {
 
 	// Shell configuration
 	ShellBackend ShellBackend
+
+	// Version history
+	HistoryStore  *HistoryStore
+	HistoryMaxAge time.Duration // default 7 days
 
 	// Auth temporary objects
 	JwtIssuer    *Authenticator
@@ -109,6 +114,14 @@ type AuthOptions struct {
 	LockoutTime     int    `json:"lockoutTime"`  // in seconds
 	LockoutLimit    int    `json:"lockoutLimit"`
 	RememberMeHours int    `json:"rememberMeHours"` // duration for "remember me" sessions
+}
+
+// VersionedWriteResult is the result of a versioned file write.
+type VersionedWriteResult struct {
+	Hash          string
+	Meta          FileMeta
+	HasConflict   bool
+	MergedContent []byte // only set if HasConflict
 }
 
 // Common errors
