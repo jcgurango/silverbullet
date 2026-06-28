@@ -1,0 +1,7 @@
+a
+<<<<<<< server
+SERVER
+=======
+CLIENT
+>>>>>>> client
+c

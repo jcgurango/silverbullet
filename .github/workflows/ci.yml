@@ -341,7 +341,7 @@ jobs:
           context: .
           platforms: ${{ env.ARCHITECTURES }}
           push: true
-          file: Dockerfile
+          file: Dockerfile.ci
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

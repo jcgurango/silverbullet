@@ -56,7 +56,7 @@ build-linux-ci: build-for-docker
 	$(MAKE) build-cli-releases-rust
 
 docker: build-for-docker
-	docker buildx build --platform linux/arm64,linux/amd64,linux/arm/v7 --push .
+	docker buildx build -f Dockerfile.ci --platform linux/arm64,linux/amd64,linux/arm/v7 --push .
 
 # Cross-compiled (native `cargo build --target`, no cargo-zigbuild). The linker/CC
 # wiring is in `.cargo/config.toml`; install the (apt-only) cross-toolchains
