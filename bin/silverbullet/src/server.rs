@@ -10,6 +10,7 @@ use silverbullet_server::auth::{
     AuthConfig, Authenticator, HeadlessTokenAuthorizer, JwtAuthorizer, LockoutTimer, LoginManager,
     RequestAuthorizer,
 };
+use silverbullet_server::history::HistoryStore;
 use silverbullet_server::shell::ShellConfig;
 use silverbullet_server::{metrics::Metrics, ServerState, ServerVersion};
 use silverbullet_server_common::space::{
@@ -188,6 +189,24 @@ fn build_state(config: &Config) -> Result<ServerState, String> {
         disable_service_worker: config.disable_service_worker,
     };
 
+    // Version history: enabled by default in writable spaces. The pruner runs
+    // hourly and keeps 7 days of commits. Disabled in read-only mode (clients
+    // can't push parent hashes there anyway).
+    let history = if config.read_only {
+        None
+    } else {
+        let store = Arc::new(HistoryStore::new(
+            &config.space_folder,
+            std::time::Duration::from_secs(60),
+        ));
+        store.clone().start_pruner(
+            std::time::Duration::from_secs(7 * 24 * 3600),
+            std::time::Duration::from_secs(3600),
+        );
+        tracing::info!("version history enabled (7-day retention, 1-minute commit interval)");
+        Some(store)
+    };
+
     Ok(ServerState {
         space,
         client_bundle: Box::new(EmbeddedSpace::<ClientAssets>::new()),
@@ -208,6 +227,7 @@ fn build_state(config: &Config) -> Result<ServerState, String> {
         // space is read-only, or no Chrome is available); /.runtime/* returns
         // 503 in that case.
         runtime: build_runtime(config, &headless_token),
+        history,
     })
 }
 

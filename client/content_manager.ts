@@ -132,7 +132,27 @@ export class ContentManager {
                   }
                 }
               })
-              .catch((e) => {
+              .catch(async (e) => {
+                const { handleMergeConflictOnSave } = await import(
+                  "./merge_conflict_handler.ts"
+                );
+                if (
+                  handleMergeConflictOnSave(
+                    {
+                      currentPath: () => this.client.currentPath(),
+                      flashNotification: (m, t) =>
+                        this.client.ui.flashNotification(m, t),
+                      loadPage: (o) =>
+                        this.client.contentManager.loadPage(
+                          { path: o.path } as any,
+                        ),
+                    },
+                    e,
+                  )
+                ) {
+                  reject(e);
+                  return;
+                }
                 this.client.ui.flashNotification(
                   "Could not save page, retrying again in 10 seconds",
                   "error",

@@ -38,13 +38,67 @@ function encodeExtensionDot(url: string): string {
   return url;
 }
 
+/**
+ * A per-call request-header injector and response-header observer. Used by
+ * features that need to ride extra headers in/out of write/read calls (e.g.
+ * the sync engine's parent/content-hash protocol) without bloating
+ * HttpSpacePrimitives with feature-specific state. Intentionally generic.
+ */
+export interface HttpHeaderHook {
+  /** Headers to merge into the outgoing request for `op` on `path`. */
+  requestHeaders?(
+    op: "read" | "write" | "delete" | "meta" | "list",
+    path: string,
+  ): Record<string, string> | undefined;
+  /** Observe the response headers for `op` on `path`. */
+  observeResponse?(
+    op: "read" | "write" | "delete" | "meta" | "list",
+    path: string,
+    status: number,
+    headers: Headers,
+  ): void;
+}
+
 export class HttpSpacePrimitives implements SpacePrimitives {
+  private headerHooks: HttpHeaderHook[] = [];
+
   constructor(
     readonly url: string,
     readonly expectedSpacePath: string,
     private authErrorCallback: (message: string, ...args: any[]) => void,
     private bearerToken?: string,
   ) {}
+
+  /** Register a generic per-call header hook (request injection + response observation). */
+  addHeaderHook(hook: HttpHeaderHook): void {
+    this.headerHooks.push(hook);
+  }
+
+  private collectRequestHeaders(
+    op: "read" | "write" | "delete" | "meta" | "list",
+    path: string,
+  ): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const h of this.headerHooks) {
+      const hh = h.requestHeaders?.(op, path);
+      if (hh) Object.assign(out, hh);
+    }
+    return out;
+  }
+
+  private notifyResponse(
+    op: "read" | "write" | "delete" | "meta" | "list",
+    path: string,
+    res: Response,
+  ): void {
+    for (const h of this.headerHooks) {
+      try {
+        h.observeResponse?.(op, path, res.status, res.headers);
+      } catch (e) {
+        console.warn("[http-space] header hook observeResponse threw", e);
+      }
+    }
+  }
 
   public async authenticatedFetch(
     url: string,
@@ -180,12 +234,14 @@ export class HttpSpacePrimitives implements SpacePrimitives {
         headers: {
           // This header won't trigger CORS preflight requests but can be interpreted on the server
           Accept: "application/octet-stream",
+          ...this.collectRequestHeaders("read", path),
         },
       },
     );
     if (res.status === 404) {
       throw notFoundError;
     }
+    this.notifyResponse("read", path, res);
     return {
       data: new Uint8Array(await res.arrayBuffer()),
       meta: headersToFileMeta(path, res.headers)!,
@@ -205,6 +261,7 @@ export class HttpSpacePrimitives implements SpacePrimitives {
       headers["X-Last-Modified"] = `${meta.lastModified}`;
       headers["X-Perm"] = `${meta.perm}`;
     }
+    Object.assign(headers, this.collectRequestHeaders("write", path));
 
     const res = await this.authenticatedFetch(
       `${this.url}/${encodePageURI(path)}`,
@@ -216,6 +273,16 @@ export class HttpSpacePrimitives implements SpacePrimitives {
       },
       0, // No timeout for uploads — transfer time depends on file size and connection speed
     );
+    this.notifyResponse("write", path, res);
+    if (res.status === 409) {
+      // Surface server-side merge conflict to the caller. Generic hooks may have
+      // already observed the response; the typed throw lets the sync engine
+      // route this without inspecting raw status codes everywhere.
+      const conflictContent = new Uint8Array(await res.arrayBuffer());
+      const serverHash = res.headers.get("X-Content-Hash");
+      const { MergeConflictError } = await import("./merge_conflict.ts");
+      throw new MergeConflictError(path, conflictContent, serverHash);
+    }
     return headersToFileMeta(path, res.headers)!;
   }
 
@@ -224,8 +291,10 @@ export class HttpSpacePrimitives implements SpacePrimitives {
       `${this.url}/${encodePageURI(path)}`,
       {
         method: "DELETE",
+        headers: this.collectRequestHeaders("delete", path),
       },
     );
+    this.notifyResponse("delete", path, req);
     if (req.status !== 200) {
       throw Error(`Failed to delete file: ${req.statusText}`);
     }
@@ -241,12 +310,14 @@ export class HttpSpacePrimitives implements SpacePrimitives {
         headers: {
           "X-Get-Meta": "true",
           ...(observing ? { "X-Observing": "true" } : {}),
+          ...this.collectRequestHeaders("meta", path),
         },
       },
     );
     if (res.status === 404) {
       throw notFoundError;
     }
+    this.notifyResponse("meta", path, res);
     if (!res.ok) {
       throw new Error(`Failed to get file meta: ${res.statusText}`);
     }

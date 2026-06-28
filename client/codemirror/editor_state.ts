@@ -53,6 +53,7 @@ import { readOnlyCursorActive } from "./util.ts";
 import { buildExtendedMarkdownLanguage } from "../markdown_parser/parser.ts";
 import { safeRun } from "@silverbulletmd/silverbullet/lib/async";
 import { codeCopyPlugin } from "../codemirror/code_copy.ts";
+import { conflictMarkerExtension } from "./conflict_marker.ts";
 import { disableSpellcheck } from "../codemirror/spell_checking.ts";
 import type { ClickEvent } from "@silverbulletmd/silverbullet/type/client";
 
@@ -158,6 +159,7 @@ export function createEditorState(
       }),
       inlineContentPlugin(client),
       codeCopyPlugin(client),
+      conflictMarkerExtension(),
       highlightSpecialChars(),
       undoHistory,
       dropCursor(),

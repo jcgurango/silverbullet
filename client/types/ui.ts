@@ -259,4 +259,7 @@ export type ServiceWorkerSourceMessage =
   | {
       type: "server-version";
       serverVersion: string;
-    };
+    }
+  // Feature-specific message types live in their own modules to avoid colliding
+  // with upstream edits to this union. Add new entries by extending here.
+  | import("../service_worker/merge_conflict_messages.ts").MergeConflictMessage;

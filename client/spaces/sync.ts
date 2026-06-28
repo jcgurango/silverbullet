@@ -20,15 +20,24 @@ export class SyncSnapshot {
   constructor(
     public files: Map<string, SyncStatusItem> = new Map(),
     public nonSyncedFiles: Map<string, FileMeta> = new Map(),
-  ) {
-    this.files = files;
-    this.nonSyncedFiles = nonSyncedFiles;
+    /** Content hash at last successful sync per .md file (used as X-Parent-Hash). */
+    public syncedHashes: Map<string, string> = new Map(),
+    /** Files frozen from sync until their inline conflict markers are resolved. */
+    public conflictedFiles: Set<string> = new Set(),
+  ) {}
+
+  /** Single removal hook so SpaceSync needs only one call per cleanup site. */
+  onFileRemoved(path: string): void {
+    this.syncedHashes.delete(path);
+    this.conflictedFiles.delete(path);
   }
 
   toJSON(): any {
     return {
       files: Object.fromEntries(this.files),
       nonSyncedFiles: Object.fromEntries(this.nonSyncedFiles),
+      syncedHashes: Object.fromEntries(this.syncedHashes),
+      conflictedFiles: [...this.conflictedFiles],
     };
   }
 
@@ -36,6 +45,8 @@ export class SyncSnapshot {
     return new SyncSnapshot(
       new Map(Object.entries(json?.files || {})),
       new Map(Object.entries(json?.nonSyncedFiles || {})),
+      new Map(Object.entries(json?.syncedHashes || {})),
+      new Set(json?.conflictedFiles || []),
     );
   }
 }
@@ -253,6 +264,11 @@ export class SpaceSync extends EventEmitter<SyncEvents> {
   ): Promise<number> {
     let operations = 0;
 
+    // Files with unresolved conflict markers are frozen until the user resolves them.
+    if (snapshot.conflictedFiles.has(path)) {
+      return 0;
+    }
+
     if (
       primaryMeta !== undefined &&
       secondaryMeta === undefined &&
@@ -318,6 +334,7 @@ export class SpaceSync extends EventEmitter<SyncEvents> {
       // File deleted on secondary
       if (syncBack) {
         snapshot.files.delete(path);
+        snapshot.onFileRemoved(path);
         if (snapshot.nonSyncedFiles.has(path)) {
           // This is the scenario where in the previous sync this file was not synced while in this new one it is
           console.log(
@@ -353,6 +370,7 @@ export class SpaceSync extends EventEmitter<SyncEvents> {
         }
         snapshot.files.delete(path);
         snapshot.nonSyncedFiles.delete(path);
+        snapshot.onFileRemoved(path);
       }
     } else if (
       // The file is on the secondary, and not on the primary
@@ -371,6 +389,7 @@ export class SpaceSync extends EventEmitter<SyncEvents> {
       await this.secondary.deleteFile(path);
       snapshot.files.delete(path);
       snapshot.nonSyncedFiles.delete(path);
+      snapshot.onFileRemoved(path);
       operations++;
     } else if (
       snapshot.files.has(path) &&
@@ -385,6 +404,7 @@ export class SpaceSync extends EventEmitter<SyncEvents> {
       );
       snapshot.files.delete(path);
       snapshot.nonSyncedFiles.delete(path);
+      snapshot.onFileRemoved(path);
       operations++;
     } else if (
       primaryMeta !== undefined &&

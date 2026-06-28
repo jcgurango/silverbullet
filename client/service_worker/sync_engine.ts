@@ -6,6 +6,8 @@ import { stdLibPrefix } from "../spaces/constants.ts";
 import type { SpacePrimitives } from "../spaces/space_primitives.ts";
 import { SpaceSync, SyncSnapshot, type SyncStatus } from "../spaces/sync.ts";
 import type { HttpSpacePrimitives } from "../spaces/http_space_primitives.ts";
+import { MergeConflictError } from "../spaces/merge_conflict.ts";
+import { maybeInstall as installHashTrackingHook } from "./hash_tracking_space_primitives.ts";
 
 const syncSnapshotKey = ["$sync", "snapshot"];
 const syncInterval = 20;
@@ -59,8 +61,12 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
   async start() {
     this.snapshot = await this.loadSnapshot();
 
+    // Wire the version-history hash protocol via a generic header hook on the
+    // HTTP space. No-op when `remote` isn't an HttpSpacePrimitives.
+    installHashTrackingHook(this.remote, () => this.snapshot);
+
     this.spaceSync = new SpaceSync(this.local, this.remote, {
-      conflictResolver: this.stdLibAwareConflictResolver.bind(this),
+      conflictResolver: this.versionedAwareConflictResolver.bind(this),
       isSyncCandidate: this.isSyncCandidate.bind(this),
     });
 
@@ -171,6 +177,90 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
     console.log("Wiping sync database");
     await this.kv.clear();
     console.log("Done wiping");
+  }
+
+  /**
+   * Wrapper that intercepts .md conflicts and delegates to the server's
+   * 3-way merge (via the X-Parent-Hash protocol). Non-.md files (including the
+   * stdlib plug case) fall through to the existing resolver. Keeping the
+   * original method untouched insulates this feature from upstream edits.
+   */
+  async versionedAwareConflictResolver(
+    name: string,
+    snapshot: SyncSnapshot,
+    primary: SpacePrimitives,
+    secondary: SpacePrimitives,
+  ): Promise<number> {
+    if (name.endsWith(".md") && !name.startsWith(stdLibPrefix)) {
+      return this.serverSideMergeResolver(name, snapshot, primary, secondary);
+    }
+    return this.stdLibAwareConflictResolver(name, snapshot, primary, secondary);
+  }
+
+  /**
+   * For .md files: push local to server (HttpSpacePrimitives auto-attaches the
+   * parent hash). On HTTP 409 the writeFile throws a MergeConflictError carrying
+   * the conflict-marked content; persist it locally + freeze the file until the
+   * user resolves the markers.
+   */
+  private async serverSideMergeResolver(
+    name: string,
+    snapshot: SyncSnapshot,
+    primary: SpacePrimitives,
+    secondary: SpacePrimitives,
+  ): Promise<number> {
+    console.log("[sync]", "Using server-side merge for", name);
+    const { data: localData, meta: localMeta } = await primary.readFile(name);
+    try {
+      await secondary.writeFile(name, localData, localMeta);
+      // The server merged cleanly; pull the merged content back to local.
+      const { data: mergedData, meta: remoteMeta } = await secondary.readFile(
+        name,
+      );
+      const newLocalMeta = await primary.writeFile(name, mergedData, remoteMeta);
+      snapshot.files.set(name, [
+        newLocalMeta.lastModified,
+        remoteMeta.lastModified,
+      ]);
+      console.log("[sync]", "Server-side merge succeeded for", name);
+      return 1;
+    } catch (e: any) {
+      if (e instanceof MergeConflictError) {
+        console.warn("[sync]", "Server-side merge conflict for", name);
+        const newLocalMeta = await primary.writeFile(
+          name,
+          e.conflictContent,
+          localMeta,
+        );
+        snapshot.conflictedFiles.add(name);
+        if (e.serverHash) {
+          snapshot.syncedHashes.set(name, e.serverHash);
+        }
+        const existing = snapshot.files.get(name);
+        snapshot.files.set(name, [
+          newLocalMeta.lastModified,
+          existing ? existing[1] : 0,
+        ]);
+        void this.emit("syncConflict", name);
+
+        // Broadcast to all clients so the inline merge UI can pop up.
+        const conflictText = new TextDecoder().decode(e.conflictContent);
+        (self as any).clients?.matchAll({ type: "window" })
+          .then((clients: any[]) => {
+            for (const c of clients) {
+              c.postMessage({
+                type: "merge-conflict",
+                path: name,
+                conflictContent: conflictText,
+                serverHash: e.serverHash,
+              });
+            }
+          })
+          .catch(() => {});
+        return 1;
+      }
+      throw e;
+    }
   }
 
   /**

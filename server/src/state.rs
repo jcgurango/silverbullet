@@ -82,4 +82,7 @@ pub struct ServerState {
     pub metrics: Option<Arc<Metrics>>,
     /// Lua runtime backend for `/.runtime/*`. May be disabled, when None: those endpoints 503.
     pub runtime: Option<Box<dyn RuntimeBackend>>,
+    /// Version-history store for `.md` files. `None` in read-only mode or when
+    /// history is disabled — handlers then take the pre-history fast path.
+    pub history: Option<Arc<crate::history::HistoryStore>>,
 }

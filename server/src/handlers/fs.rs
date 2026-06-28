@@ -7,8 +7,27 @@ use axum::response::{IntoResponse, Response};
 use silverbullet_server_common::FileMeta;
 
 use crate::handlers::{http_date, space_error_response};
+use crate::history::{sha256_hex, versioned_write, VersionedWriteError, VersionedWriteResult};
 use crate::router::run_blocking;
 use crate::state::ServerState;
+
+/// Run `f` on the blocking pool. Mirrors `run_blocking` but with a custom error.
+async fn run_blocking_versioned<F>(f: F) -> Result<VersionedWriteResult, VersionedWriteError>
+where
+    F: FnOnce() -> Result<VersionedWriteResult, VersionedWriteError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(join_err) => {
+            tracing::error!("versioned write join error: {join_err}");
+            Err(VersionedWriteError::Space(
+                silverbullet_server_common::SpaceError::Io(std::io::Error::other(format!(
+                    "blocking task join error: {join_err}"
+                ))),
+            ))
+        }
+    }
+}
 
 pub async fn handle_fs_list(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
     let state_inner = state.clone();
@@ -40,13 +59,22 @@ pub async fn handle_fs_get(
 ) -> impl IntoResponse {
     // Metadata-only probe.
     if headers.get("X-Get-Meta").is_some() {
+        let is_versioned_md = is_md(&path) && state.history.is_some();
         let state_inner = state.clone();
         let path_inner = path.clone();
         return match run_blocking(move || state_inner.space.get_file_meta(&path_inner)).await {
-            Ok(meta) => set_file_meta_headers(Response::builder().status(StatusCode::OK), &meta)
-                .header("Cache-Control", "no-store")
-                .body(Body::empty())
-                .unwrap(),
+            Ok(meta) => {
+                let mut builder =
+                    set_file_meta_headers(Response::builder().status(StatusCode::OK), &meta)
+                        .header("Cache-Control", "no-store");
+                if is_versioned_md {
+                    // Reconcile + emit content hash so the sync engine can use it as parent hash.
+                    if let Some(hash) = reconcile_and_hash(&state, &path).await {
+                        builder = builder.header("X-Content-Hash", hash);
+                    }
+                }
+                builder.body(Body::empty()).unwrap()
+            }
             Err(e) => space_error_response(e),
         };
     }
@@ -83,6 +111,7 @@ pub async fn handle_fs_get(
         .map(|v| v.contains("application/octet-stream"))
         .unwrap_or(false);
 
+    let is_versioned_md = is_md(&path) && state.history.is_some();
     let state_inner = state.clone();
     let path_inner = path.clone();
     match run_blocking(move || state_inner.space.read_file(&path_inner)).await {
@@ -105,10 +134,50 @@ pub async fn handle_fs_get(
             if !last_modified.is_empty() {
                 builder = builder.header(axum::http::header::LAST_MODIFIED, &last_modified);
             }
+            if is_versioned_md {
+                let hash = sha256_hex(&data);
+                // Run reconcile off the hot path: we already have the body bytes here.
+                let history = state.history.clone().unwrap();
+                let path_for_reconcile = path.clone();
+                let data_for_reconcile = data.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) =
+                        history.reconcile_disk_state(&path_for_reconcile, &data_for_reconcile)
+                    {
+                        tracing::warn!("reconcile failed for {path_for_reconcile}: {e}");
+                    }
+                })
+                .await;
+                builder = builder.header("X-Content-Hash", hash);
+            }
             builder.body(Body::from(data)).unwrap()
         }
         Err(e) => space_error_response(e),
     }
+}
+
+fn is_md(path: &str) -> bool {
+    path.ends_with(".md")
+}
+
+/// Read the file fresh, reconcile its disk state into history, and return its
+/// content hash. Returns `None` on any error (the caller falls back to omitting
+/// the header).
+async fn reconcile_and_hash(state: &Arc<ServerState>, path: &str) -> Option<String> {
+    let history = state.history.clone()?;
+    let state_inner = state.clone();
+    let path_inner = path.to_string();
+    let result = run_blocking(move || state_inner.space.read_file(&path_inner)).await;
+    let (data, _) = result.ok()?;
+    let path_for_reconcile = path.to_string();
+    let data_for_reconcile = data.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Err(e) = history.reconcile_disk_state(&path_for_reconcile, &data_for_reconcile) {
+            tracing::warn!("reconcile failed for {path_for_reconcile}: {e}");
+        }
+    })
+    .await;
+    Some(sha256_hex(&data))
 }
 
 /// Set the `X-*` file-metadata headers the client reads off `/.fs` responses.
@@ -130,6 +199,11 @@ pub async fn handle_fs_put(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    // Versioned path: `.md` files when history is enabled.
+    if is_md(&path) && state.history.is_some() {
+        return handle_versioned_put(state, path, headers, body).await;
+    }
+
     let meta = file_meta_from_headers(&headers, &path);
     let state_inner = state.clone();
     let path_inner = path.clone();
@@ -153,6 +227,67 @@ pub async fn handle_fs_put(
     }
 }
 
+/// Versioned write for `.md` files. Reads X-Parent-Hash, routes through the
+/// merge logic in `history::versioned_write`, and emits X-Content-Hash on every
+/// successful path. Returns 409 with conflict-marked body on merge conflict.
+async fn handle_versioned_put(
+    state: Arc<ServerState>,
+    path: String,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let parent_hash = headers
+        .get("X-Parent-Hash")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // We need a Sync handle to the space inside the blocking closure. `state` is
+    // `Arc<ServerState>` and `ServerState.space: Box<dyn SpacePrimitives>` is
+    // already `Send + Sync` per the trait, so cloning the Arc is enough.
+    let state_for_blocking = state.clone();
+    let path_for_blocking = path.clone();
+    let body_vec = body.to_vec();
+    let parent_for_blocking = parent_hash.clone();
+    let history = state.history.as_ref().expect("history present").clone();
+
+    let result = run_blocking_versioned(move || {
+        versioned_write::handle(
+            state_for_blocking.space.as_ref(),
+            &history,
+            &path_for_blocking,
+            &body_vec,
+            &parent_for_blocking,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(VersionedWriteResult::Ok { hash, meta }) => {
+            set_file_meta_headers(Response::builder().status(StatusCode::OK), &meta)
+                .header("Cache-Control", "no-store")
+                .header("X-Content-Hash", hash)
+                .body(Body::from("OK"))
+                .unwrap()
+        }
+        Ok(VersionedWriteResult::Conflict { hash, meta, merged }) => {
+            set_file_meta_headers(Response::builder().status(StatusCode::CONFLICT), &meta)
+                .header("Cache-Control", "no-store")
+                .header("X-Content-Hash", hash)
+                .body(Body::from(merged))
+                .unwrap()
+        }
+        Err(VersionedWriteError::Space(e)) => space_error_response(e),
+        Err(VersionedWriteError::History(e)) => {
+            tracing::error!("history error during PUT {path}: {e}");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(e.to_string()))
+                .unwrap()
+        }
+    }
+}
+
 pub async fn handle_fs_delete(
     State(state): State<Arc<ServerState>>,
     Path(path): Path<String>,
@@ -160,10 +295,23 @@ pub async fn handle_fs_delete(
     let state_inner = state.clone();
     let path_inner = path.clone();
     match run_blocking(move || state_inner.space.delete_file(&path_inner)).await {
-        Ok(()) => Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from("OK"))
-            .unwrap(),
+        Ok(()) => {
+            if is_md(&path) {
+                if let Some(history) = state.history.clone() {
+                    let path_inner = path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Err(e) = history.delete_history(&path_inner) {
+                            tracing::warn!("failed to delete history for {path_inner}: {e}");
+                        }
+                    })
+                    .await;
+                }
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from("OK"))
+                .unwrap()
+        }
         Err(e) => space_error_response(e),
     }
 }
@@ -497,5 +645,178 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get.status(), StatusCode::NOT_FOUND);
+    }
+
+    mod versioned {
+        use crate::test_support::test_state_with_history;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        async fn put(
+            app: axum::Router,
+            path: &str,
+            body: &'static [u8],
+            parent: Option<&str>,
+        ) -> axum::http::Response<Body> {
+            let mut req = Request::builder().method("PUT").uri(format!("/.fs/{path}"));
+            if let Some(p) = parent {
+                req = req.header("X-Parent-Hash", p);
+            }
+            app.oneshot(req.body(Body::from(body)).unwrap())
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn first_md_write_returns_content_hash() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+            let resp = put(app, "p.md", b"hello", None).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let h = resp
+                .headers()
+                .get("X-Content-Hash")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(h.len(), 64);
+        }
+
+        #[tokio::test]
+        async fn fast_forward_with_matching_parent_succeeds() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+
+            let r1 = put(app.clone(), "p.md", b"v1", None).await;
+            assert_eq!(r1.status(), StatusCode::OK);
+            let parent = r1
+                .headers()
+                .get("X-Content-Hash")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+
+            let r2 = put(app, "p.md", b"v2", Some(&parent)).await;
+            assert_eq!(r2.status(), StatusCode::OK);
+            let new_hash = r2
+                .headers()
+                .get("X-Content-Hash")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_ne!(new_hash, parent);
+        }
+
+        #[tokio::test]
+        async fn diverged_clean_merge_returns_ok_with_new_hash() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+
+            // Base v0
+            let r0 = put(app.clone(), "p.md", b"a\nb\nc\n", None).await;
+            assert_eq!(r0.status(), StatusCode::OK);
+            let base = r0
+                .headers()
+                .get("X-Content-Hash")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+
+            // Server advances HEAD: edit line 1.
+            let r1 = put(app.clone(), "p.md", b"A\nb\nc\n", Some(&base)).await;
+            assert_eq!(r1.status(), StatusCode::OK);
+
+            // Client commits against the old base, editing line 3 (non-overlapping).
+            let r2 = put(app, "p.md", b"a\nb\nC\n", Some(&base)).await;
+            assert_eq!(r2.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn diverged_conflict_returns_409_with_conflict_body() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+
+            let r0 = put(app.clone(), "p.md", b"line1\nline2\nline3\n", None).await;
+            let base = r0
+                .headers()
+                .get("X-Content-Hash")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+
+            let _ = put(app.clone(), "p.md", b"line1\nSERVER\nline3\n", Some(&base)).await;
+
+            let resp = put(app, "p.md", b"line1\nCLIENT\nline3\n", Some(&base)).await;
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+            assert!(resp.headers().get("X-Content-Hash").is_some());
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let s = String::from_utf8(body.to_vec()).unwrap();
+            assert!(s.contains("<<<<<<< server"));
+            assert!(s.contains("SERVER"));
+            assert!(s.contains("CLIENT"));
+            assert!(s.contains(">>>>>>> client"));
+        }
+
+        #[tokio::test]
+        async fn legacy_put_without_parent_hash_fast_forwards() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+
+            assert_eq!(
+                put(app.clone(), "p.md", b"v1", None).await.status(),
+                StatusCode::OK
+            );
+            // Second write without X-Parent-Hash should NOT 409.
+            assert_eq!(put(app, "p.md", b"v2", None).await.status(), StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn get_md_returns_content_hash_header() {
+            let (state, _td) = test_state_with_history();
+            let app = crate::build_router(Arc::new(state));
+            put(app.clone(), "p.md", b"hello", None).await;
+
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/.fs/p.md")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(resp.headers().get("X-Content-Hash").is_some());
+        }
+
+        #[tokio::test]
+        async fn delete_md_clears_history() {
+            let (state, _td) = test_state_with_history();
+            let history = state.history.clone().unwrap();
+            let app = crate::build_router(Arc::new(state));
+
+            put(app.clone(), "p.md", b"hello", None).await;
+            assert!(!history.get_head("p.md").unwrap().is_empty());
+
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri("/.fs/p.md")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(history.get_head("p.md").unwrap(), "");
+        }
     }
 }

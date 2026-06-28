@@ -1133,6 +1133,20 @@ export class Client {
         }
         break;
       }
+      case "merge-conflict": {
+        const { dispatchMergeConflictMessage } = await import(
+          "./merge_conflict_handler.ts"
+        );
+        dispatchMergeConflictMessage(
+          {
+            currentPath: () => this.currentPath(),
+            flashNotification: (m, t) => this.ui.flashNotification(m, t),
+            loadPage: (o) => this.contentManager.loadPage({ path: o.path } as any),
+          },
+          message,
+        );
+        break;
+      }
       case "server-version": {
         if (message.serverVersion === publicVersion) {
           const wasInSync = this.versionsInSync;

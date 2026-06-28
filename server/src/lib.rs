@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod handlers;
+pub mod history;
 pub mod metrics;
 pub mod router;
 pub mod runtime;
@@ -53,6 +54,21 @@ mod test_support {
             },
             metrics: None,
             runtime: None,
+            history: None,
         }
+    }
+
+    /// `test_state` with a fresh on-disk HistoryStore. The returned `TempDir`
+    /// keeps the history root alive for the duration of the test.
+    pub fn test_state_with_history() -> (ServerState, tempfile::TempDir) {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let td = tempfile::TempDir::new().expect("tempdir");
+        let mut state = test_state();
+        state.history = Some(Arc::new(crate::history::HistoryStore::new(
+            td.path(),
+            Duration::from_secs(0),
+        )));
+        (state, td)
     }
 }
